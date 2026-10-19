@@ -1,3 +1,14 @@
+## 3.27.0+volumio.1
+
+* Fork of 3.27.0 for the Volumio app. Fixes crashes when WebKit callbacks,
+  proxy API codec replies or Dart messages already queued on the main queue
+  outlive the plugin's teardown on `sceneDidDisconnect` /
+  `applicationWillTerminate` (UIScene apps hit this whenever iOS disconnects
+  the scene of a backgrounded app). Ports flutter/packages#13130 and
+  flutter/packages#13140, and defers clearing the instance manager. See
+  https://github.com/flutter/flutter/issues/192975 and
+  https://github.com/flutter/flutter/issues/194340.
+
 ## 3.27.0
 
 * Adds `WebKitWebViewWidgetCreationParams.uiKitGestureBlockingPolicy` for choosing the gesture
