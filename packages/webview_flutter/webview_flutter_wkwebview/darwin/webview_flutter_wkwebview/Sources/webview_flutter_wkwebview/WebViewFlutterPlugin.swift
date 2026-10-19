@@ -12,10 +12,12 @@
 
 public class WebViewFlutterPlugin: NSObject, FlutterPlugin {
   var proxyApiRegistrar: ProxyAPIRegistrar?
+  private let messenger: TeardownAwareBinaryMessenger
 
   init(binaryMessenger: FlutterBinaryMessenger) {
+    messenger = TeardownAwareBinaryMessenger(binaryMessenger)
     proxyApiRegistrar = ProxyAPIRegistrar(
-      binaryMessenger: binaryMessenger)
+      binaryMessenger: messenger)
     proxyApiRegistrar?.setUp()
   }
 
@@ -43,10 +45,20 @@ public class WebViewFlutterPlugin: NSObject, FlutterPlugin {
   }
 
   private func tearDownProxyAPIRegistrar() {
-    proxyApiRegistrar?.ignoreCallsToDart = true
-    proxyApiRegistrar?.tearDown()
-    try? proxyApiRegistrar?.instanceManager.removeAllObjects()
+    guard let registrar = proxyApiRegistrar else { return }
+    registrar.ignoreCallsToDart = true
+    // Nothing reaches Dart after this point, including the finalizer callbacks of instances
+    // deallocated before the instance manager is cleared below.
+    messenger.tearDown()
+    registrar.tearDown()
     proxyApiRegistrar = nil
+    // A Dart message the engine has already dispatched to the main queue still runs its handler
+    // after tearDown, and decodes its arguments through the instance manager. Clearing it now
+    // would hand that handler a null instead of its object. Clear it once those messages have
+    // drained; the main queue is FIFO and later messages no longer find a handler.
+    DispatchQueue.main.async {
+      try? registrar.instanceManager.removeAllObjects()
+    }
   }
 }
 

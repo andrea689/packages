@@ -32,7 +32,7 @@ import Testing
         plugin.proxyApiRegistrar!.instanceManager, key, finalizer, .OBJC_ASSOCIATION_RETAIN)
 
       await confirmation("Wait for InstanceManager to be deallocated.") { confirm in
-        TestFinalizer.onDeinit = {
+        finalizer!.onDeinit = {
           confirm()
         }
 
@@ -42,6 +42,8 @@ import Testing
         #expect(plugin.proxyApiRegistrar == nil)
 
         finalizer = nil
+        // The InstanceManager is cleared once the main queue has drained.
+        await drainMainQueue()
       }
     }
 
@@ -63,7 +65,7 @@ import Testing
         plugin.proxyApiRegistrar!.instanceManager, key, finalizer, .OBJC_ASSOCIATION_RETAIN)
 
       await confirmation("Wait for InstanceManager to be deallocated.") { confirm in
-        TestFinalizer.onDeinit = {
+        finalizer!.onDeinit = {
           confirm()
         }
 
@@ -74,15 +76,106 @@ import Testing
         #expect(plugin.proxyApiRegistrar == nil)
 
         finalizer = nil
+        // The InstanceManager is cleared once the main queue has drained.
+        await drainMainQueue()
       }
+    }
+
+    @MainActor @Test func messageQueuedBeforeTeardownIsHandledAfterIt() async throws {
+      let messenger = RecordingBinaryMessenger()
+      let plugin = WebViewFlutterPlugin(binaryMessenger: messenger)
+      let registrar = plugin.proxyApiRegistrar!
+
+      let view = UIView()
+      view.isOpaque = true
+      _ = registrar.instanceManager.addHostCreatedInstance(view)
+
+      // The engine looks up the handler of a message and then runs it from the main queue, so a
+      // message dispatched before the scene disconnected still runs the handler it captured.
+      let channel = "dev.flutter.pigeon.webview_flutter_wkwebview.UIView.setOpaque"
+      let handler = try #require(messenger.handlers[channel])
+      let message = registrar.codec.encode([view, false])
+
+      let scene = UIApplication.shared.connectedScenes.first!
+      (plugin as FlutterSceneLifeCycleDelegate).sceneDidDisconnect?(scene)
+      // Messages delivered after teardown find no handler.
+      #expect(messenger.handlers[channel] == nil)
+
+      // Generated handlers force-cast their arguments, so the instance must still be found.
+      var reply: Data?
+      handler(message) { reply = $0 }
+      #expect(reply != nil)
+      #expect(!view.isOpaque)
+
+      await drainMainQueue()
+    }
+
+    @MainActor @Test func instanceDeallocatedAfterTeardownDoesNotMessageDart() async throws {
+      let messenger = RecordingBinaryMessenger()
+      let plugin = WebViewFlutterPlugin(binaryMessenger: messenger)
+      let registrar = plugin.proxyApiRegistrar!
+
+      let identifier = registrar.instanceManager.addHostCreatedInstance(NSObject())
+      let channel =
+        "dev.flutter.pigeon.webview_flutter_wkwebview.PigeonInternalInstanceManager.removeStrongReference"
+      let handler = try #require(messenger.handlers[channel])
+
+      let scene = UIApplication.shared.connectedScenes.first!
+      (plugin as FlutterSceneLifeCycleDelegate).sceneDidDisconnect?(scene)
+
+      // A message from Dart queued before teardown releases the last strong reference after it,
+      // so the instance is deallocated while its finalizer is still attached.
+      autoreleasepool {
+        handler(FlutterStandardMessageCodec.sharedInstance().encode([identifier])) { _ in }
+      }
+      #expect(messenger.sentChannels.isEmpty)
+
+      await drainMainQueue()
     }
   #endif
 }
 
 class TestFinalizer {
-  static var onDeinit: (() -> Void)?
+  // Per instance, since the InstanceManager is released after the main queue drains, which can
+  // interleave with other tests.
+  var onDeinit: (() -> Void)?
 
   deinit {
-    Self.onDeinit?()
+    onDeinit?()
   }
 }
+
+/// Lets the work already enqueued on the main queue run, such as the InstanceManager clear that
+/// plugin teardown defers.
+@MainActor func drainMainQueue() async {
+  await withCheckedContinuation { continuation in
+    DispatchQueue.main.async { continuation.resume() }
+  }
+}
+
+#if os(iOS)
+  /// Records the handlers set on it and the channels messages are sent on.
+  class RecordingBinaryMessenger: NSObject, FlutterBinaryMessenger {
+    var handlers: [String: FlutterBinaryMessageHandler] = [:]
+    var sentChannels: [String] = []
+
+    func send(onChannel channel: String, message: Data?) {
+      sentChannels.append(channel)
+    }
+
+    func send(
+      onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply? = nil
+    ) {
+      sentChannels.append(channel)
+    }
+
+    func setMessageHandlerOnChannel(
+      _ channel: String, binaryMessageHandler handler: FlutterBinaryMessageHandler? = nil
+    ) -> FlutterBinaryMessengerConnection {
+      handlers[channel] = handler
+      return 0
+    }
+
+    func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) {}
+  }
+#endif

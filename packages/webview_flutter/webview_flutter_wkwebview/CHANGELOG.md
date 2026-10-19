@@ -1,3 +1,8 @@
+## 3.27.1
+
+* Fixes a crash when a message from Dart that was already queued is handled after the plugin is
+  torn down, for example when the scene disconnects.
+
 ## 3.27.0
 
 * Adds `WebKitWebViewWidgetCreationParams.uiKitGestureBlockingPolicy` for choosing the gesture
