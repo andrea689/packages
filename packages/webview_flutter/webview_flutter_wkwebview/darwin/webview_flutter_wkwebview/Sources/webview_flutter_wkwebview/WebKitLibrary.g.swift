@@ -667,10 +667,14 @@ open class WebKitLibraryPigeonProxyApiRegistrar {
     PigeonApiSecTrust.setUpMessageHandlers(binaryMessenger: binaryMessenger, api: nil)
     PigeonApiSecCertificate.setUpMessageHandlers(binaryMessenger: binaryMessenger, api: nil)
     PigeonApiUIColor.setUpMessageHandlers(binaryMessenger: binaryMessenger, api: nil)
+    _codec = nil
   }
 }
 private class WebKitLibraryPigeonInternalProxyApiCodecReaderWriter: FlutterStandardReaderWriter {
-  unowned let pigeonRegistrar: WebKitLibraryPigeonProxyApiRegistrar
+  // The codec can outlive the registrar's owner while an asynchronous
+  // reply is being encoded. Keep the registrar alive until that codec is
+  // released; tearDown breaks the registrar's own codec reference.
+  let pigeonRegistrar: WebKitLibraryPigeonProxyApiRegistrar
 
   private class WebKitLibraryPigeonInternalProxyApiCodecReader: WebKitLibraryPigeonCodecReader {
     unowned let pigeonRegistrar: WebKitLibraryPigeonProxyApiRegistrar
@@ -716,6 +720,11 @@ private class WebKitLibraryPigeonInternalProxyApiCodecReaderWriter: FlutterStand
         || value is UrlCredentialPersistence || value is DartSecTrustResultType
       {
         super.writeValue(value)
+        return
+      }
+
+      if pigeonRegistrar.ignoreCallsToDart {
+        super.writeValue(NSNull())
         return
       }
 
