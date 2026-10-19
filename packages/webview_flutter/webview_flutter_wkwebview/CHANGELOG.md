@@ -1,3 +1,10 @@
+## 3.27.0+volumio.2
+
+* Drops every message to Dart once the plugin is torn down. The deferred instance manager clear
+  kept the instance finalizers attached, and an instance deallocated in between messaged Dart,
+  possibly after the engine had shut down (see
+  https://github.com/flutter/flutter/issues/168535).
+
 ## 3.27.0+volumio.1
 
 * Fork of 3.27.0 for the Volumio app. Fixes crashes when WebKit callbacks,

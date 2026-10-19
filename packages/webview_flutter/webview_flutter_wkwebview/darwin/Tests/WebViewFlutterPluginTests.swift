@@ -81,28 +81,56 @@ import Testing
       }
     }
 
-    @MainActor @Test func teardownKeepsInstancesForMessagesAlreadyQueued() async throws {
-      let plugin = WebViewFlutterPlugin(binaryMessenger: TestBinaryMessenger())
+    @MainActor @Test func messageQueuedBeforeTeardownIsHandledAfterIt() async throws {
+      let messenger = RecordingBinaryMessenger()
+      let plugin = WebViewFlutterPlugin(binaryMessenger: messenger)
       let registrar = plugin.proxyApiRegistrar!
-      let codec = registrar.codec
 
       let view = UIView()
-      let identifier = registrar.instanceManager.addHostCreatedInstance(view)
-      // A message from Dart that names the instance, which the engine dispatched to the main
-      // queue before the scene disconnected.
-      let message = codec.encode([view])
+      view.isOpaque = true
+      _ = registrar.instanceManager.addHostCreatedInstance(view)
+
+      // The engine looks up the handler of a message and then runs it from the main queue, so a
+      // message dispatched before the scene disconnected still runs the handler it captured.
+      let channel = "dev.flutter.pigeon.webview_flutter_wkwebview.UIView.setOpaque"
+      let handler = try #require(messenger.handlers[channel])
+      let message = registrar.codec.encode([view, false])
+
+      let scene = UIApplication.shared.connectedScenes.first!
+      (plugin as FlutterSceneLifeCycleDelegate).sceneDidDisconnect?(scene)
+      // Messages delivered after teardown find no handler.
+      #expect(messenger.handlers[channel] == nil)
+
+      // Generated handlers force-cast their arguments, so the instance must still be found.
+      var reply: Data?
+      handler(message) { reply = $0 }
+      #expect(reply != nil)
+      #expect(!view.isOpaque)
+
+      await drainMainQueue()
+    }
+
+    @MainActor @Test func instanceDeallocatedAfterTeardownDoesNotMessageDart() async throws {
+      let messenger = RecordingBinaryMessenger()
+      let plugin = WebViewFlutterPlugin(binaryMessenger: messenger)
+      let registrar = plugin.proxyApiRegistrar!
+
+      let identifier = registrar.instanceManager.addHostCreatedInstance(NSObject())
+      let channel =
+        "dev.flutter.pigeon.webview_flutter_wkwebview.PigeonInternalInstanceManager.removeStrongReference"
+      let handler = try #require(messenger.handlers[channel])
 
       let scene = UIApplication.shared.connectedScenes.first!
       (plugin as FlutterSceneLifeCycleDelegate).sceneDidDisconnect?(scene)
 
-      // Its handler decodes after teardown and must still find the instance: generated handlers
-      // force-cast their arguments.
-      let arguments = codec.decode(message) as? [Any?]
-      #expect(arguments?.first as? UIView === view)
+      // A message from Dart queued before teardown releases the last strong reference after it,
+      // so the instance is deallocated while its finalizer is still attached.
+      autoreleasepool {
+        handler(FlutterStandardMessageCodec.sharedInstance().encode([identifier])) { _ in }
+      }
+      #expect(messenger.sentChannels.isEmpty)
 
       await drainMainQueue()
-      let cleared: UIView? = registrar.instanceManager.instance(forIdentifier: identifier)
-      #expect(cleared == nil)
     }
 
     @MainActor @Test func codecOutlivesTeardown() async throws {
@@ -174,3 +202,30 @@ final class WeakTestReference<Value: AnyObject> {
     self.value = value
   }
 }
+
+#if os(iOS)
+  /// Records the handlers set on it and the channels messages are sent on.
+  class RecordingBinaryMessenger: NSObject, FlutterBinaryMessenger {
+    var handlers: [String: FlutterBinaryMessageHandler] = [:]
+    var sentChannels: [String] = []
+
+    func send(onChannel channel: String, message: Data?) {
+      sentChannels.append(channel)
+    }
+
+    func send(
+      onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply? = nil
+    ) {
+      sentChannels.append(channel)
+    }
+
+    func setMessageHandlerOnChannel(
+      _ channel: String, binaryMessageHandler handler: FlutterBinaryMessageHandler? = nil
+    ) -> FlutterBinaryMessengerConnection {
+      handlers[channel] = handler
+      return 0
+    }
+
+    func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) {}
+  }
+#endif
